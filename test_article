@@ -1,0 +1,311 @@
+{{For|frontend performance guidelines|Wikimedia Performance Team/Page load performance}}
+
+这些是'''MediaWiki后端开发'''的性能指南，旨在部署到维基媒体基金会的维基网站。
+
+== 该怎么做（概要） ==
+
+* 准备好对你的代码的性能感到惊讶；预测往往是坏的。
+* [[Performance profiling for Wikimedia code|严格测量性能（在你的开发环境和生产环境中）]]，并知道时间花在哪里。
+* 当发现延迟时，要负责任并将其作为优先事项；你对使用模式和测试内容有最好的想法。
+* 性能往往与不良工程的其他症状有关；想想根本原因。
+** MediaWiki很复杂，可以以意想不到的方式互动。你的代码可能会在其他地方暴露出性能问题，你需要识别。
+* 没被缓存的昂贵但有价值的操作应该最多需要5秒，2秒更好。
+** 如果这还不够，可以考虑使用作业队列在后台服务器上执行任务。
+
+===一般性能原则===
+
+MediaWiki应用程序开发：
+
+* 延迟加载那些不会影响页面初始渲染的[[ResourceLoader/Vocabulary#Resources|模块]]，特别是“折叠内容之上”（用户屏幕上最初可见的页面顶部部分）。因此，尽可能少地加载JavaScript，而是按需加载更多的组件。有关更多信息，请参见[[ResourceLoader/Developing with ResourceLoader#Loading modules|加载模块]]。
+* 用户应该有一个流畅的体验；不同的组件应该逐步呈现。保留元素的定位（例如，避免在页面重排时把内容挤到后面）。
+
+维基媒体基础设施：
+* 你的代码是在一个共享环境中运行的。因此，长期运行的SQL查询不能作为网络请求的一部分运行。相反，应该让它们在专门的服务器上运行（使用JobQueue），并注意死锁和锁定等待超时的问题。
+
+* 你创建的表将被其他代码所共享。每个数据库查询必须能够使用其中一个索引（包括写查询！）。[http://dev.mysql.com/doc/refman/4.1/en/using-explain.html EXPLAIN]，并在需要时创建新的索引。
+
+* 为你的需求选择合适的持久层。Redis作业队列，MariaDB数据库，或Swift文件存储。只有在你的代码能够始终有效地处理缓存数据消失的情况下，才进行缓存；否则，就持久化数据。
+* 维基媒体使用并严重依赖许多不同的缓存层，所以你的代码需要在这种环境下工作！（但如果所有东西都没被缓存命中，也必须正常运行。）
+* 缓存命中率应尽可能高；注意你是否引入了新的cookies、共享资源、捆绑请求或调用，或其他会改变请求并降低缓存命中率的改变。
+
+== 如何考虑性能 ==
+
+=== 测量 ===
+测量你的代码运行的速度，这样你就可以基于事实而不是迷信或感觉来做决定。将这些原则与[[Architecture guidelines|架构指南]]和[[Security for developers/Architecture|安全指南]]一起使用。'''性能'''（你的代码运行得（相对）快）和'''可扩展性'''（你的代码在更大的维基上和多次并发实例化时不会变得更慢）都很重要；都要测量。
+
+==== 百分比 ====
+总是考虑高的百分位数值而不是中位数。
+
+网络中的性能数据有两个不同的“信号”是很常见的：一个是用户通过热缓存访问应用程序，另一个是用户通过冷缓存访问应用程序。在有这两个信号的数据集上计算平均数是毫无意义的。为了对数据进行快速检查，请确保你至少有10,000个数据点，并计算出50%和90%的统计量。这两个数字可能相差很大，这可能表明您可以修复性能问题。例如，如果网络往返速度相当慢，而且你有很多资源被获取，你会看到用户来到你的网站时，有缓存资源（从而避免了所有那些缓慢的往返）和没有缓存资源的巨大差异。
+如果你有足够的数据那就更好了，你可以计算出1、50、90和99的百分位数。一个好的经验法则是，要有统计学意义，你需要10,000个数据点来计算第90个百分点，100,000个数据点来计算第99个百分点，100万个数据点来计算第99.9个百分点。
+
+这条经验法则使事情有点过于简单化，但对性能分析很有效。（[https://hpbn.co/primer-on-web-performance/#analyzing-real-user-measurement-data 关于这个的一些文献]）
+
+=== 延迟 ===
+无论网络延迟如何，软件都应以可接受的速度运行，但有些操作可能会有令人惊讶的网络延迟变化，如启用[[Instant Commons]]时查找图像文件。记住，延迟也取决于用户的连接。维基媒体网站为许多使用移动或拨号连接的人提供服务，这些连接既慢又有很高的[[:en:Round-trip delay time|往返时间]]。也有一些快速的连接具有较长的RTT，例如卫星调制解调器，2秒的RTT并不罕见。
+
+可以有一些方法来管理延迟：
+* 首先，要意识到哪些代码路径是要永远快速的（数据库，memcache），哪些可能是缓慢的（获取文件信息或垃圾邮件黑名单，可能是跨维基的，在互联网上）。
+* 在创建可能间歇性变慢的代码路径时，'''记录这个事实'''。
+* 小心不要堆积请求——例如，外部搜索引擎可能在恶劣条件下返回较慢，而它通常很快。瓶颈可能会导致所有的网络服务器陷入困境。
+* 考虑将操作分解成可以分离的小块
+* 或者，可以考虑并行运行操作——这可能有点棘手，因为MediaWiki目前还没有一次执行多个HTTP读取的好的原语
+
+（当然，延迟在一定程度上取决于用户的连接。维基媒体网站为许多使用移动或拨号连接的人服务。这个目标在300毫秒左右的[[:en:Round-trip delay time|往返时间]]内是合理的。如果有人用的是2000ms RTT的卫星，那么他们可以预期所有的东西都很慢，但那只是一小部分用户。）
+
+最坏情况下，一个开销较高但有价值的请求，在它未命中缓存或无法缓存的时候，应当在5秒的服务器时间以内计算完成。最好能到2秒钟。
+
+* 例如：保存对页面的新编辑
+* 例如：显示视频缩略图
+
+=== 我的代码多久运行一次？ ===
+考虑网站或浏览器执行代码的频率是很重要的。以下是主要的例子：
+* ''频繁''。这显然是最关键的。
+* ''浏览页面时''（实际发送HTML时）——就是说，也很频繁了，除非用户收到<code>304 Not Modified</code>返回码或者类似这个。几乎每次匿名（未登录）读者阅读维基百科页面时，他们都会收到预先渲染好的HTML。如果你添加了新的代码，每次有人浏览页面时都会运行，[[wikitech:Incident documentation/20120607-LastModifiedExtension|那就要注意了]]。
+* ''渲染页面内容时''。MediaWiki（如在维基媒体网站上的配置）通常只在编辑后或缓存缺失后才需要渲染页面内容（在服务器端），所以渲染的频率远远低于页面浏览。出于这个原因，性能开销更大的操作是可以接受的。渲染通常不会在用户等待的时候进行——除非用户刚刚编辑了页面，这就导致...
+* ''保存编辑时''。这是最罕见的代码路径，也是可以接受最大延迟的路径。用户倾向于接受在执行一个“感觉很重”的动作后的较长时间等待，比如编辑一个页面。(但维基媒体希望鼓励更多的人编辑和上传，所以这个标准可能会改变）。)
+
+还要注意请求失败后的代码路径。例如，注意“严密的重试循环”，这可能会导致数以百计的服务器陷入错误循环中。如果可能的话，在失败后，你应该转而重新安排或在短时间内缓存错误，然后再试一次。(不正确的缓存错误也很危险)。
+
+=== 你不是一个人 ===
+在开始设计系统体系结构之前，与[[Wikimedia Performance Team|Performance Team]]一起了解一般性能目标。例如，面向用户的应用程序的延迟时间可能为200毫秒，而数据库的延迟时间可能为20毫秒或更短，特别是在根据以前查询的结果决定进一步访问时。你不想过早地优化，但是你需要了解你的目标是否物理上可行。
+
+您可能不需要设计自己的后端; 可以考虑使用现有的服务，或者请人为您设计一个接口。考虑模块化。性能是很难的，不要试图重新造轮子。
+
+== ResourceLoader ==
+{{For|frontend performance guidelines|Wikimedia Performance Team/Page load performance}}
+
+== 使用共享的资源与执行环境 ==
+请注意，你的代码会使用共享的资源（如数据库、队列和缓存服务器）的环境中运行。因此，长时间运行的查询（如5秒以上）应该在专用服务器上运行。例如，复杂的特殊页面列表的重新生成使用“vslow”数据库服务器。注意容易出现死锁和锁定等待超时的查询模式；长时间运行的事务、写或锁定的<code>SELECT</code>查询中低效的<code>WHERE</code>子句、在同一事务中“间隙锁定”查询之前的插入查询。在评估查询是否会花费“很长时间”或引起争用时，对它们进行性能分析。这些数字总是相对于服务器的总体性能，以及它的运行频率而言的。
+
+主要的执行环境是对单个网络请求的响应，其他环境是CLI模式（例如维护脚本）。要注意的是，各种扩展可以通过钩子增加额外的查询和更新。为了尽量减少核心和扩展之间的交互导致的超时、死锁和半完成更新的风险，应该在[[Database transactions|主事务轮]]中努力使RDBMS和对象存储的写入快速而简单。对于那些需要花费大量时间或复杂的更新，应尽可能使用DeferredUpdates或JobQueue，以更好地将不同的模块相互隔离。当数据项发生变化时，使用简单的缓存清理来进行重新计算，以避免速度变慢（还可以避免竞态条件问题以及多数据中心复制问题）。
+
+=== Rate limiting ===
+If your product exposes new user actions that make database modifications beyond the standard page creation / page editing mechanism, then firstly consider whether this is appropiate and scalable. You're going to have a lot less maintenance overhead and operationa risk if you adopt [[Everything is a wiki page|"Everything is a wiki page"]]. See also [https://mcfunley.com/choose-boring-technology Choose boring technology] by Dan McKinley.
+
+If you do have to expose new "write" actions, make sure a rate limit is applied.
+
+Example:
+
+* UrlShortener exposes API to create new short URLs, which needs a rate limit. Typically powered by <code>User::pingLimiter</code>. [[phab:T133109|T133109]] 
+
+For expensive computations that are not write actions, such as power user features that may expose slow or expensive computations,, consider implementing a throttle based on [[PoolCounter]] to limit overall server load.
+
+Example:
+
+* Special:Contributions exposes a database read query that can be slow. This is rate limited by PoolCounter. See also [[phab:T234450|T234450]] and [[phab:T160985|T160985]].
+
+===Long-running queries===
+
+Long-running queries that do reads should be on a dedicated server, as Wikimedia does with analytics. MySQL uses snapshots for SELECT queries, and the snaphotting persists until COMMIT if BEGIN was used. Snapshots implement REPEATABLE-READ by making sure that, in the transaction, the client sees the database as it existed in single point in time (the time of the first SELECT). Keeping one transaction open for more than (ideally) seconds is a bad idea on production servers. As long as a REPEATABLE-READ transaction is open (that did at least one query), MySQL has to keep the old versions of rows around in the index that were since deleted or changed because the long-running transaction should see them in any relevant SELECT queries. These rows can clutter up the index of hot tables that have nothing to do with the long-running query. There are [[meta:Research|research databases]] - use those. Special pages can use the "vslow" query group to be mapped to dedicated databases.
+
+=== Locking===
+Wikimedia's MySQL/MariaDB servers use InnoDB, which supports [https://dev.mysql.com/doc/refman/5.1/en/innodb-record-level-locks.html repeatable read transactions]. Gap locking is part of "Next-key Locks", which is how InnoDB implements REPEATABLE READ transaction isolation level. At Wikimedia, repeatable read transaction isolation is on by default (unless the code is running in Command-Line Interaction (CLI) mode, as with the maintenance scripts), so all the SQL SELECT queries you do within one request will automatically get bundled into a transaction. For more information, see the Wikipedia articles on [[:en:Isolation (database systems)]] and look up repeatable read (snapshot isolation), to understand why it's best to avoid phantom reads and other phenomena.
+: Anytime you are doing a write/delete/update query that updates something, it will have gap locks on it unless it is by a unique index. Even if you are not in repeatable read, even if you are doing one SELECT, it will be internally consistent if, for example, it returns multiple rows.Thus: do your operations, e.g., DELETE or UPDATE or REPLACE, on a unique index, such as a primary key. The situations where you were causing gap locks and you want to switch to doing operations on a primary key are ones where you want to do a SELECT first to find the ID to operate on; this can't be SELECT FOR UPDATE since it has the same locking problems. This means you might have to deal with race condition problems, so you may want to use INSERT IGNORE instead of INSERT.
+
+Here's a common mistake that causes inappropriate locking: take a look at, for instance, the table <code>user_properties</code> (line 208 of tables.sql), in which you have a three-column table that follows the "Entity-value-attribute" pattern. 
+# Column 1: the object/entity (here, UserID)
+# Column 2: the name of a property for that object
+# Column 3: the value associated with that property for the object
+
+That is, you have a bunch of key-values for each entity that are all in one table. (This table schema is kind of an antipattern. But at least this is a reasonably specific table that just holds user preferences.)In this situation, it's tempting to create a workflow for user preference changes that deletes all the rows for that userID, then reinserts new ones. But this causes a lot of contention for the database. Instead, change the query so you only delete by the primary key. SELECT it first, and then, when you INSERT new values, you can use INSERT IGNORE (which ignores the insert if the row already exists). This is more efficient. Alternatively, you can use a JSON blob, but this is hard to use in JOINs or WHERE clauses in single entries. See [http://brightbox.com/blog/2013/10/31/on-mysql-locks/ "On MySQL locks"] for some explanation of gap locks.
+
+=== Transactions===
+
+Every web request and every database operation, in general, should occur within a transaction. However, be careful when mixing a database transaction with an operation on something else, such as another database transaction or accessing an external service like Swift. Be particularly careful with locking order. Every time you update or delete or insert anything, ask:
+* what you are locking?
+* are there other callers?
+* what are you doing, after making the query, all the way to making the commit?
+
+Avoid excessive contention. Avoid locking things in an unnecessary order, especially when you're doing something slow and committing at the end. For instance, if you have a counter column that you increment every time something happens, then DON'T increment it in a hook just before you parse a page for 10 seconds.
+
+Do not use READ UNCOMMIT (if someone updates a row in a transaction and has not committed it, another request can still see it) or SERIALIZABLE (every time you do SELECT, it's as if you did SELECT FOR UPDATE, a.k.a. lock-and-share mode -- locking every row you select until you commit the transaction -leads to lock-wait timeouts and deadlocks).
+
+===Examples===
+
+'''Good example''': <code>{{git file | project = mediawiki/core | file =includes/MessageBlobStore.php}}</code>. When message blobs (JSON collections of several translations of specific messages) change, it can lead to updates of database rows, and the update attempts can happen concurrently. In a previous version of the code, the code locked a row in order to write to it and avoid overwrites, but this could lead to contention. In contrast, in the current codebase, the <code>updateMessage()</code> method performs a repeated attempt at update until it determines (by checking timestamps) that there will be no conflict. See lines 212-214 for an explanation and see line 208-234 for the outer do-while loop that processes <code>$updates</code> until it is empty.
+
+'''Bad example''': The former structure of the ArticleFeedbackv5 extension. Code included:
+
+<syntaxhighlight lang="SQL"> INSERT /* DatabaseBase::insert Asher Feldman */ INTO `aft_article_feedback`
+(af_page_id,af_revision_id,af_created,af_us
+er_id,af_user_ip,af_user_anon_token,af_form_id,af_experiment,af_link_id,af_has_comment) VALUES
+('534366','506813755','20120813223135','14719981',NULL,'','6','M5_6','0','1')
+INSERT /* ApiArticleFeedbackv5::saveUserRatings Asher Feldman */ INTO `aft_article_answer`
+(aa_field_id,aa_response_rating,aa_response_text,aa_response_boolean,aa_response_option_id,aa_feedb
+ack_id,aat_id) VALUES ('16',NULL,NULL,'1',NULL,'253294',NULL),('17',NULL,'Well sourced article!
+(this is a test comment) ',NULL,NULL,'253294',NULL)
+UPDATE /* ApiArticleFeedbackv5::saveUserRatings Asher Feldman */ `aft_article_feedback` SET
+af_cta_id = '2' WHERE af_id = '253294'
+</syntaxhighlight> 
+
+Bad practices here include the multiple counter rows with id = '0' updated every time feedback is given on any page, and the use of DELETE + INSERT IGNORE to update a single row. Both result in locks that prevent >1 feedback submission saving at a time (due to the use of transactions, these locks persist beyond than the time needed by the individual statements). See minutes 11-13 of [[:File:MediaWiki Performance Profiling.ogv|Asher Feldman's performance talk]] & [[:File:MediaWikiPerformanceProfiling.pdf#17|page 17 of his slides]] for more explanation.
+
+== Indexing ==
+The tables you create will be shared by other code. Every database query must be able to use one of the indexes (including write queries!).
+
+Unless you're dealing with a tiny table, you need to index writes (similarly to reads). Watch out for deadlocks and for lock-wait timeouts. Try to do updates and deletes by primary query, rather than some secondary key. Try to avoid UPDATE/DELETE queries on rows that do not exist. Make sure join conditions are cleanly indexed.
+
+You cannot index blobs, but you can index blob prefixes (the substring comprising the first several characters of the blob).
+
+Compound keys - namespace-title pairs are all over the database. You need to order your query by asking for namespace first, then title!
+
+Use EXPLAIN & MYSQL DESCRIBE query to find out which indexes are affected by a specific query. If it says "Using temporary table" or "Using filesort" in the EXTRA column, that's ''often'' bad! If "possible_keys" is NULL, that's often bad (small sorts and temporary tables are tolerable though). An "obvious" index may not actually be used due to poor "selectivity". See the [[Performance profiling for Wikimedia code]] guide, and for more details, see [[:File:Why your extension will not be enabled on Wikimedia wikis in its current state and what you can do about it.pdf|Roan Kattouw's 2010 talk on security, scalability and performance for extension developers]], [[Manual:Database_layout/MySQL_Optimization/Tutorial|Roan's MySQL optimization tutorial from 2012]] ([[:File:SQL indexing Tutorial.pdf|slides]]), and [http://tstarling.com/presentations/Tim%20Performance%202013.pdf Tim Starling's 2013 performance talk].
+
+Indexing is not a silver bullet; more isn't always better. Once an index gets big enough that it doesn't fit into RAM anymore, it slows down dramatically. Additionally, an index can make reads faster, but writes slower.
+
+'''Good example''': See [https://phabricator.wikimedia.org/diffusion/MW/browse/master/maintenance/tables.sql the <code>ipblock</code> and <code>page_props</code> tables]. One of them also offers a reverse index, which gives you a cheap alternative to SORT BY.
+
+'''Bad example''': See [https://gerrit.wikimedia.org/r/#/c/132460/1/repo/includes/store/sql/EntityPerPageTable.php this changeset (a fix)]. As the note states, "needs to be id/type, not type/id, according to the definition of the relevant index in <code>wikibase.sql</code>: <code>wb_entity_per_page (epp_entity_id, epp_entity_type)</code>". Rather than using the index that was built on the id-and-type combination, the previous code (that this is fixing) attempted to specify an index that was "type-and-id", which did not exist. Thus, MariaDB did not use the index, and thus instead tried to order the table without using the index, which caused the database to try to sort 20 million rows with no index.
+
+== Persistence layer ==
+Choose the right persistence layer for your needs: job queue (like Redis), database (like MariaDB), or file store (like Swift). In some cases, a cache can be used instead of a persistence layer.
+
+Wikimedia sites makes use of local services including Redis, MariaDB, Swift, and memcached. (Also things like Parsoid that plug in for specific things like VisualEditor.) They are expected to reside on a low-latency network. They are local services, as opposed to remote services like Varnish.
+
+People often put things into databases that ought to be in a cache or a queue. Here's when to use which:
+# MySQL/MariaDB database - longterm storage of structured data and blobs.
+# Swift file store - longterm storage for binary files that may be large. See [[wikitech:Media storage]] for details.
+# [[Redis]] jobqueue - you add a job to be performed, the job is done, and then the job is gone. You don't want to lose the jobs before they are run. But you are ok with there being a delay.
+: (in the future maybe MediaWiki should support having a high-latency and a low-latency queue.)
+
+A cache, such as memcached, is storage for things that persist between requests, and that you don't need to keep - you're fine with losing any one thing. Use memcached to store objects if the database ''could'' recreate them but it would be computationally expensive to do so, so you don't want to recreate them too often. You can imagine a spectrum between caches and stores, varying on how long developers expect objects to live in the service before getting evicted; see the [[#Caching layers|Caching layers]] section for more.
+
+'''Permanent names''': In general, store resources under names that won't change. In MediaWiki, files are stored under their "pretty names", which was probably a mistake - if you click Move, it ought to be fast (renaming title), but other versions of the file also have to be renamed. And Swift is distributed, so you can't just change the metadata on one volume of one system.
+
+'''Object size''': Memcached sometimes gets abused by putting big objects in there, or where it would be cheaper to recalculate than to retrieve. So don't put things in memcached that are TOO trivial - that causes an extra network fetch for very little gain. A very simple lookup, like "is a page watched by current user", does not go in the cache, because it's indexed well so it's a fast database lookup.
+
+'''When to use the job queue''': If the thing to be done is fast (~5 milliseconds) or '''needs''' to happen synchronously, then do it synchronously. Otherwise, put it in the job queue.  You do not want an HTTP request that a user is waiting on to take more than a few seconds.  Examples using the job queue:
+
+* Updating link table on pages modified by a template change
+* Transcoding a video that has been uploaded
+
+HTMLCacheUpdate is synchronous if there are very few backlinks. Developers also moved large file uploads to an asynchronous workflow because users started experiencing timeouts.
+
+In some cases it may be valuable to create separate classes of job queues -- for instance video transcoding done by [[Extension:TimedMediaHandler]] is stored in the job queue, but a dedicated runner is used to keep the very long jobs from flooding other servers. Currently this requires some manual intervention to accomplish (see TMH as an example). 
+
+Extensions that use the job queue include RenameUser, TranslationNotification, Translate, GWToolset, and  MassMessage.
+
+Additional examples:
+* large uploads. UploadWizard has API core modules and core jobs take care of taking chunks of file, reassembling, turning into a file the user can view. The user starts defining the description, metadata, etc., and the data is sent 1 chunk at a time. 
+* purging all the pages that use a template from Varnish & bumping the <code>page_touched</code> column in the database, which tells parser cache it's invalid and needs to be regenerated
+* refreshing links: when a page links to many pages, or it has categories, it's better to refresh links or update categories after saving, then propagate the change. (For instance, adding a category to a template or removing it, which means every page that uses that template needs to be linked to the category -- likewise with files, externals, etc.)
+
+How slow or contentious is the thing you are causing? Maybe your code can't do it on the same web request the user initiated. You do not want an HTTP request that a user is waiting on to take more than a few seconds. 
+
+Example: You create a new kind of notification. Good idea: put the actual notification action (emailing people) or adding the flags (user id n now has a new notification!) into the jobqueue. Bad idea: putting it into a database transaction that has to commit and finish before the user gets a response.
+
+'''Good example''': The [[Extension:BetaFeatures|Beta features extension]] lets a user opt in for a "Beta feature" and displays, to the user, how many users have opted in to each of the currently available Beta features.  The preferences themselves are stored in <code>user_properties</code> table.  However, directly counting the number of opted-in users every time that count is displayed would not have acceptable performance.  Thus, MediaWiki stores those counts in the database in the <code>betafeatures_user_counts</code> table, but they are also stored in memcached. It's important to immediately update the user's own preference and be able to display the updated preference on page reload, but it's not important to immediately report to the user the increase or decrease in the count, and this information doesn't get reported in [[Special:Statistics]].
+
+Therefore, BetaFeatures updates those user counts every half hour or so, and no more. Specifically, the extension creates a job that does a SELECT query. Running this query takes a long time - upwards of 5 minutes! So it's done once, and then on the next user request, the result gets cached in memcached for the page https://en.wikipedia.org/wiki/Special:Preferences#mw-prefsection-betafeatures . (They won't get updated at all if no one tries to fetch them, but that is unlikely.) If a researcher needs a realtime count, they can directly query the database outside of MediaWiki application flow.
+
+Code: [https://phabricator.wikimedia.org/diffusion/EBET/browse/master/includes/UpdateBetaFeatureUserCountsJob.php;268ada71a69e2897fed29a9932d17353e534a02f UpdateBetaFeatureUserCountsJob.php] and [https://phabricator.wikimedia.org/diffusion/EBET/browse/master/BetaFeaturesHooks.php;268ada71a69e2897fed29a9932d17353e534a02f BetaFeaturesHooks.php].
+
+'''Bad example''': ''add one?''
+
+=== Multiple datacenters ===
+''See [[Database_transactions#Appropriate_contexts_for_write_queries|Database transactions]]''
+
+Once CDN requests reach (non-proxy) origin servers, the responding service (such as Apache/MediaWiki, Thumbor, or HyperSwitch) must limit its own read operations from persistence layers to only involve the local datacenter. The same applies to write operations to caching layers, with the exception of allowing asynchronous purging broadcasts or asynchronous replication of caches that are profoundly expensive to regenerate from scratch (e.g. parser cache in MySQL). Write operations to source data persistence layers (MySQL, Swift, Cassandra) are more complex, but generally should only happen on HTTP POST or PUT requests from end-users and should be synchronous in the local datacenter, with asynchronous replication to remote datacenters. Updates to search index persistence layers (Elastic, BlazeGraph) can use either this approach, the [[Job queue]], or [[Change propagation]]. The enqueue operations to the job/propagation systems are themselves synchronous in the local datacenter (with asynchronous replication to the remote ones).
+
+HTTP POST/PUT requests to MediaWiki will be routed to the ''master'' datacenter and the MediaWiki job queue workers only run there as well (e.g. where the logic of <code>Job::run()</code> executes). An independent non-MediaWiki API service ''might'' be able to run write APIs correctly in multiple datacenters at once if it has very limited semantics and has no relational integrity dependencies on other source data persistence layers. For example, if the service simply takes end-user input and stores blobs keyed under new UUIDs, there is no way that writes can conflict. If updates or deletions are later added as a feature, then Last-Write-Wins might be considered a "correct" approach to handling write conflicts between datacenters (e.g. if only one user has permission to change any given blob then all conflicts are self-inflicted). If write conflicts are not manageable, then such API requests should be routed to the ''master'' datacenter.
+
+== Work involved during cache misses ==
+Wikimedia uses and depends heavily on many different caching layers, so your code needs to work in that environment! (But it also must work if everything misses cache.) 
+
+'''Cache-on-save''': Wikimedia sites use a preemptive cache-repopulation strategy: if your code will create or modify a large object when the user hits "save" or "submit", then along with saving the modified object in the database/filestore, populate the right cache with it (or schedule a job in the job queue to do so). This will give users faster results than if those large things were regenerated dynamically when someone hit the cache. Localization (i18n) messages, SpamBlacklist data, and parsed text (upon save) are all aggressively cached. (See "Caching layers" for more.)
+
+At the moment, this strategy does not work well for memcached for Wikimedia's multi-datacenter use case. A workaround when using WANObjectCache is to use <code>getWithSetCallback</code> as normal, but with "lockTSE" set and with a "check" key passed in. The key can be "bumped" via <code>touchCheckKey</code> to perform invalidations ''instead'' of using <code>delete</code>. This avoids cache stampedes on purge for hot keys, which is usually the main goal.
+
+If something is VERY expensive to recompute, then use a cache that is somewhat closer to a store. For instance, you might use the backend (secondary) Varnishes, which are often called a cache, but are really closer to a store, because objects tend to persist longer there (on disk).
+
+'''Cache misses are normal''': Avoid writing code that, on cache miss, is ridiculously slow. (For instance, it's not okay to <code>count *</code> and assume that a memcache between the database and the user will make it all right; cache misses and timeouts eat a lot of resources. Caches are not magic.) The cluster has a limit of 180 seconds per script (see [https://phabricator.wikimedia.org/diffusion/OPUP/browse/master/modules/applicationserver/files/php/php.ini;7b6149989d55260e36622183009dfe77ecaa1ae9$5 the limit in Puppet]); if your code is so slow that a function exceeds the max execution time, it will be killed.
+
+Write your queries such that an uncached computation will take a reasonable amount of time. To figure out what is reasonable for your circumstance, ask the [[Site performance and architecture]] team.
+
+If you can't make it fast, see if you can do it in the background. For example, see some of the statistics special pages that run expensive queries. These can then be run on a dedicated time on large installations. But again, this requires manual setup work -- only do this if you have to.
+
+'''Watch out for cached HTML''': HTML output may sit around for a long time and still needs to be supported by the CSS and JS. Problems where old JS/CSS hang around are in some ways more obvious, so it's easier to find them early in testing, but stale HTML can be insidious!
+
+'''Good example''': See the [[Extension:TwnMainPage|TwnMainPage extension]]. It offloads the recalculation of statistics (site stats and user stats) to the job queue, adding jobs to the queue before the cache expires. In case of cache miss, it does not show anything; see [https://github.com/wikimedia/mediawiki-extensions-TwnMainPage/blob/master/CachedStat.php CachedStat.php]. It also sets a limit of 1 second for calculating message group stats; see [https://github.com/wikimedia/mediawiki-extensions-TwnMainPage/blob/master/specials/SpecialTwnMainPage.php#L227 SpecialTwnMainPage.php].
+
+'''Bad example''': [[bugzilla:63249|a change]] "disabled varnish cache, where previously it was set to cache in varnish for 10 seconds. Given the amount of hits that page gets, even a 10 second cache is probably helpful."
+
+== Caching layers ==
+The cache hit ratio should be as high as possible; watch out if you're introducing new cookies, shared resources, bundled requests or calls, or other changes that will vary requests and reduce cache hit ratio.
+
+Caching layers that you need to care about:
+# Browser caches
+## native browser cache
+## LocalStorage. See [[meta:Research:Module storage performance#Results]] to see the statistical proof that storing ResourceLoader storage in LocalStorage speeds page load times and causes users to browse more.
+# Front-end Varnishes
+#: The Varnish caches cache ''entire HTTP responses'', including thumbnails of images, frequently-requested pages, ResourceLoader modules, and similar items that can be retrieved by URL. The front-end Varnishes keep these in memory. A weighted-random load balancer (LVS) distributes web requests to the front-end Varnishes.
+#: Because Wikimedia distributes its front-end Varnishes geographically (in the Amsterdam & San Francisco caching centers as well as the Texas and Virginia data centers) to reduce latency to users, some engineers refer to those front-end Varnishes as "edge caching" and sometimes as a CDN (content delivery network). See [[wikitech:MediaWiki at WMF]] for some details.
+# Back-end Varnishes
+#: If a frontend Varnish doesn't have a response cached, it passes the request to the back-end Varnishes via hash-based load balancing (on the hash of the URI). The backend Varnishes hold more responses, storing them ondisk. Every URL is on at most one backend Varnish.
+# object cache (implemented in memcached in WMF production, but other implementations include Redis, APC, etc.)
+#: The object cache is a generic service used for many things, e.g., the user object cache. It's a generic service that many services can stash things in.  You can also use that service as a layer in a larger caching strategy, which is what the parser cache does in Wikimedia's setup. One layer of the parser cache lives in the object cache.
+#: Generally, don't disable the parser cache. See: [[Manual:How to use the parser cache|How to use the parser cache]].
+# database's buffer pool and query cache (not directly controllable)
+
+How do you choose which cache(s) to use, and how to watch out for putting inappropriate objects into a cache? See [[Picking the right cache|"Picking the right cache: a guide for MediaWiki developers"]].
+
+Figure out how to appropriately invalidate content from caching by purging, directly updating (pushing data into cache), or otherwise bumping timestamps or versionIDs. Your application needs will determine your [[Cache purging strategy]].
+
+Since the Varnishes serve content per URL, URLs ought to be deterministic -- that is, they should not serve different content from the same URL. Different content belongs at a different URL. This should be true for anonymous users; for logged-in users, Wikimedia's configuration contains additional wrinkles involving cookies and the caching layers.
+
+'''Good example''': (from the [https://gerrit.wikimedia.org/r/#/c/120806/ mw.cookie change]) of not poisoning the cache with request-specific data (when cache is not split on that variable). Background: <code>mw.cookie</code> will use MediaWiki's cookie settings, so client-side developers don't think about this.  These are passed via the ResourceLoader startup module.  Issue: However, it doesn't use [[Manual:$wgCookieSecure]] (instead, this is documented not to be supported), since the default value ('<code>detect</code>') varies by the request protocol, and the startup module does not vary by protocol.  Thus, the first hit could poison the module with data that will be inapplicable for other requests.
+
+'''Bad examples''':
+* GettingStarted error: Don't use Token in your cookie name. In this case, the cookie name hit a regular expression that Varnish uses to know what to cache and not cache. See [https://phabricator.wikimedia.org/rEGST22fbeedfc51fdd3ed780ed52bc880df8d07bfc19 the code], [https://gerrit.wikimedia.org/r/#/c/130228/ an initial revert], [https://gerrit.wikimedia.org/r/#/c/130229/ another early fix], [https://gerrit.wikimedia.org/r/#/c/130332/ another revert commit], [https://gerrit.wikimedia.org/r/#/c/130336/ the Varnish layer workaround], [https://gerrit.wikimedia.org/r/#/c/130352/ the followup fix], the GettingStarted fix [https://gerrit.wikimedia.org/r/#/c/130381/ part 1] and [https://gerrit.wikimedia.org/r/#/c/130393/ part 2], and [https://gerrit.wikimedia.org/r/#/c/130516/ the regex fix].
+* [https://phabricator.wikimedia.org/T58602 WikidataClient was fetching a large object from memcached] just to decide which project group it was on, when it would have been more efficient to simply recompute it by putting the very few values needed into a global variable. (See [https://gerrit.wikimedia.org/r/#/c/93773/ the changeset that fixed the bug].)
+* [https://phabricator.wikimedia.org/rEGTO4ab986cb23327aecf80738653001479509447b9e Template parse on every page view] is a bad thing, as it obviates the advantage of the parser cache (the cache that caches parsed wikitext).
+
+=== Multiple data centers ===
+WMF runs multiple data centers ("eqiad", "codfw", etc.). The plan is to move to a master/slave data center configuration ([[ Requests_for_comment/Master_%26_slave_datacenter_strategy_for_MediaWiki#Design_implications|see RFC]]), where users read pages from caches at the closest data center, while all update activity flows to the master data center.
+Most MediaWiki code need not be directly aware of this, but it does have implications for how developers write code; see [[Requests_for_comment/Master_%26_slave_datacenter_strategy_for_MediaWiki#Design_implications | RFC's Design implications ]].
+:''TODO: bring guidelines from RFC to here and other pages.
+
+== Cookies ==
+For cookies, besides the concerns having to do with caching (see "Caching layers", above), there is also the issue that cookies bloat the payload of every request, that is, they result in more data sent back and forth, often unnecessarily. While the effect of bloated header payloads in page performance is less immediate than the impact of blowing up Varnish cache ratios, it is not less measurable or important. Please consider the usage of localStorage or sessionStorage as an alternative to cookies.  Client-side storage works well in non-IE browsers, and in IE from IE8 onward.
+
+See also Google's advice on [https://developers.google.com/speed/docs/insights/rules minimizing request overhead].
+
+== See also ==
+
+* [[Architecture guidelines]]
+* [[Security for developers/Architecture]].
+
+===MediaWiki-specific===
+
+====Technical documents====
+* [[wikitech:Graphite|WMF usage of Graphite]]
+* [[Redis#MediaWiki_.26_Wikimedia_use_cases_for_Redis|MediaWiki & Wikimedia use cases for Redis]]
+* [[API:Etiquette]]
+* [https://doc.wikimedia.org/mediawiki-core/master/php/classJob.html Job class reference]
+* [[Manual:Job queue]] (and [[Manual:Job queue/For developers]])
+* [[Manual:How to debug]]
+* [[Manual:Profiling]]
+* [[Performance profiling for Wikimedia code]]
+
+====Talks====
+* [[:File:Why your extension will not be enabled on Wikimedia wikis in its current state and what you can do about it.pdf|"Why your extension will not be enabled on Wikimedia wikis in its current state and what you can do about it"]], Roan Kattouw, Wikimania, July 2010
+* [[Code_review_management/July_2011_training#Tim.27s_security_and_performance_talk|Notes from Tim Starling's security and performance talk]], WMF training session, July 2011
+* [[Manual:Database_layout/MySQL_Optimization/Tutorial|MediaWiki MySQL optimization tutorial]] ([[:File:SQL indexing Tutorial.pdf|slides]]), Roan Kattouw, Berlin Hackathon, June 2012
+* [[:File:MediaWiki Performance Profiling.ogv|"MediaWiki Performance Profiling"]] (video) ([[:File:MediaWikiPerformanceProfiling.pdf|slides]]), Asher Feldman, WMF Tech Days, September 2012
+* [http://tstarling.com/presentations/Tim%20Performance%202013.pdf "MediaWiki Performance Techniques"], Tim Starling, Amsterdam Hackathon, May 2013
+* [https://www.youtube.com/watch?v=acZ3SwbhsaM "Let's talk about web performance"] (video), Peter Hedenskog, WMF [[tech talks|tech talk]], August 2015
+
+====Posts and discussions====
+* [https://blog.wikimedia.org/2012/03/15/measuring-site-performance-at-the-wikimedia-foundation/ "Measuring Site Performance at the Wikimedia Foundation"], Asher Feldman, March 2012
+* [https://blog.wikimedia.org/2013/02/05/how-the-technical-operations-team-stops-problems-in-their-tracks/ "How the Technical Operations team stops problems in their tracks"], Sumana Harihareswara, February 2013
+* [[Requests for comment/Performance standards for new features]], December 2013
+* [[Architecture_Summit_2014/Performance|Notes from performance discussion]], Architecture Summit 2014, January 2014
+
+===General web performance===
+* [http://aosabook.org/en/distsys.html "Scalable Web Architecture and Distributed Systems"] (book chapter), Kate Matsudaira, May 2012
+* [http://ljungblad.nu/post/83400324746/80-of-end-user-response-time-is-spent-on-the-frontend "80% of end-user response time is spent on the frontend"], Marcus Ljungblad, April 2014
+
+{{TNT|Conventions navigation}}
+
+[[Category:Wikimedia Performance Team{{#translation:}}]]

@@ -1,0 +1,6 @@
+{| class="wikitable"
+! abc !! Cell | 1.1 || Cell 1.2
+|-
+| Cell 2.1 [[target|link
+title]] || still cell 2.1
+|}

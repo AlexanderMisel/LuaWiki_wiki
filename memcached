@@ -1,0 +1,172 @@
+'''[https://memcached.org/ memcached]'''是一个内存对象存储，MediaWiki可以用它来[[Manual:Caching|缓存数值]]，以减少执行昂贵的计算的需要，并减少数据库服务器的负载。
+
+== 何时使用 ==
+对于一个由单一服务器托管的小型网站来说，可能不值得这么麻烦，还安装Memcached。对于这种情况，可以考虑将MediaWiki配置为使用PHP的APCu来代替主要对象存储。对于像维基百科这样的大型网站，以及一般由多个网络服务器托管的维基来说，Memcached是MediaWiki对象缓存的一个常见选择。
+
+更多关于MediaWiki中的缓存选项，请参见[[Manual:Performance tuning#Object%20caching|Manual:性能调整 § 对象缓存]]
+
+==安装Memcached==
+大多数Linux和macOS的软件包管理器都有Memcached的即用型软件包（包括Debian、Fedora和Ubuntu）。
+
+如果你的发行版没有可用的包，你可能需要从[https://memcached.org/ memcached.org]上下载，从源码上编译。要从源代码编译，你还需要[https://www.monkey.org/~provos/libevent/ libevent]。Memcached和libevent是在BSD风格的许可证下发布的开源项目。
+
+关于Memcached的更多信息，请参见维基百科上的[[:en:Memcached|"Memcached"]]。
+
+===安全性===
+Memcached没有安全性或认证。请确保你的服务器有适当的防火墙，并且memcached服务器使用的端口不被公开访问。否则，互联网上的任何人都可以把数据放进你的缓存并从中读取数据。
+
+熟悉MediaWiki内部结构的攻击者可以利用这一点给自己提供开发者权限，并删除维基数据库中的所有数据，以及获得所有用户的密码哈希值和电子邮件地址。
+
+==Memcached的PHP客户端==
+截至目前（MediaWiki 1.27），MediaWiki使用一个纯PHP的memcached客户端（基于Ryan T. Dean的工作）。它还支持php-memcached PECL扩展。要在MediaWiki中使用Memcached，PHP必须在编译时加入--<code>--enable-sockets</code>（这是默认的）。
+
+要阅读更多关于如何选择Memcached作为MediaWiki不同部分的后端，请参见[Manual:Caching#Interfaces|Manual:Caching]]。
+
+==安装==
+如果你想从小做起，只需在你的网络服务器上运行一个memcached：
+
+  memcached -d -l 127.0.0.1 -p 11211 -m 64
+
+（以守护（daemon）模式运行，只能通过回环接口访问，端口为11211，最多使用64MB内存）
+
+在你的LocalSettings.php文件中，设置：
+<syntaxhighlight lang="php">
+$wgMainCacheType = CACHE_MEMCACHED;
+$wgParserCacheType = CACHE_MEMCACHED; // 可选
+$wgMessageCacheType = CACHE_MEMCACHED; // 可选
+$wgMemCachedServers = [ '127.0.0.1:11211' ];
+
+$wgSessionsInObjectCache = true; // 可选 -- 在1.33+中移除
+$wgSessionCacheType = CACHE_MEMCACHED; // 可选
+</syntaxhighlight>
+然后wiki应该使用memcached来缓存各种数据。要使用多个服务器（物理上独立的盒子或在大内存x86/Power盒子的一台机器上有多个缓存），只需在阵列中添加更多的项目。要增加一个服务器的权重（比如说，因为它的内存是其他服务器的两倍，你想平均分配使用量），让它的条目成为一个子阵列：
+
+<syntaxhighlight lang="php">
+$wgMemCachedServers = [
+    '127.0.0.1:11211', // 1 GB on this box
+    [ '192.168.0.1:11211', 2 ] // 2 GB on the other box
+];
+</syntaxhighlight>
+
+== SELinux ==
+对于有SELinux的系统，有几种针对Memcached的策略。为了允许Apache（httpd）访问Memcached，你必须设置以下策略。
+  setsebool -P httpd_can_network_memcache 1
+
+== 故障排除 ==
+
+=== 保存时丢失会话数据 ===
+
+如果你在memcached中存储会话数据，而用户在试图保存编辑时断断续续地看到这个消息。
+
+<div style="padding-left: 2em">
+对不起！由于会话数据丢失，我们无法处理您的编辑。
+
+您可能已经退出。请核实您是否仍在登录，并重试。 如果仍然不能工作，尝试退出并重新登录，并检查您的浏览器是否允许来自该网站的cookie。
+</div>
+
+那么你的一个或多个memcached服务器可能有一个配置错误的<code>/etc/hosts</code>文件。在你的每个memcached服务器上，确保服务器自己的主机名被映射到：
+
+ 127.0.0.1  '''servername.here''' localhost localhost.localdomain ...
+
+否则，服务器可能无法连接到自己的memcached进程。
+
+==在你的代码中使用memcached==
+如果你正在编写一个进行昂贵的数据库查询的扩展，在memcached中缓存数据可能是有用的。有几种主要的方法来获取memcached的控制权。
+*<syntaxhighlight lang="php">$cache = ObjectCache::getMainWANInstance()</syntaxhighlight>...use this if you want a memory-based shared '''cache''' with explicit purge ability in order to store values derived from persistent sources
+* <syntaxhighlight lang="php">$cache = ObjectCache::getLocalClusterInstance()</syntaxhighlight>...use this if you want a memory-based ephemeral '''store''' that is not shared among datacenters
+* <syntaxhighlight lang="php">$cache = ObjectCache::getLocalServerInstance()</syntaxhighlight>...use this if you want a memory-based ephemeral '''cache''' that is not shared among web servers
+* <syntaxhighlight lang="php">$cache = wfGetCache( CACHE_ANYTHING )</syntaxhighlight>...use this if you want any available '''cache''', which may or may not be per-datacenter, even an emulated one that uses a SQL database. Note that these may return handles that talk to Redis, APC, MySQL or other stores instead. 使用“memcached”这个词在历史上是由于API是围绕memcached所支持的简单命令而定义的，而且到目前为止，memcached通常是最好的通用缓存存储。
+
+Extensions that have specific needs (like persistence) should define new configuration settings like <code>$wgMyExtCache</code> or <code>$wgMyExtWANCache</code>. Code using the caches can pass them to <code>wfGetCache()</code> and 
+<code>ObjectCache::getWANInstance()</code>, respectively.
+
+下面的代码片段演示了如何将数据库查询的结果缓存到memcached中15分钟，并首先查询memcached的结果而不是数据库。
+<syntaxhighlight lang="php">
+class MyExtensionFooBars {
+	public function getPopularTen() {
+		$cache = ObjectCache::getMainWANInstance();
+		
+		return $cache->getWithSetCallback(
+			// The variadic arguments to wfMemcKey() are used to construct the key for the cache 
+			// in memcached. It must be unique to the query you are saving. The first value is normally
+			// the extension or component name, and following values tell you what query you are saving.
+			$cache->makeKey( 'myextension', 'foobars', 'popular', '10' ),
+			// Cache for 15 minutes
+			$cache::TTL_MINUTE * 15,
+			// Function to generate the value on cache miss
+			function ( $oldValue, &$ttl, &$setOpts ) {
+				$dbr = wfGetDB( DB_REPLICA );
+				// Adjust TTL based on DB replication lag
+				$setOpts = Database::getCacheSetOptions( $dbr );
+
+				$res = $dbr->select(
+					// your database query goes here
+					// see Database::select for docs
+				);
+
+				$data = array();
+				foreach ( $res as $row ) {
+					$data[] = array(
+						// Do something with the data we
+						// just got from the database
+						// For example, if we looked up
+						// page_id from the page table,
+						// we could do this:
+						'id' => $row->page_id
+					);
+				}
+
+				return $data;
+			}
+		);
+	}
+}
+</syntaxhighlight>
+
+The abstract BagOStuff and WANObjectCache classes define and document all of the available functions:
+* {{Class doclink|BagOStuff}}
+* {{Class doclink|WANObjectCache}}
+
+==Old Development Notes==
+Broadly speaking, we'd like to be able to dump lots of data in the cache, use it whenever we can, and automatically expire it when changes are made.
+
+===Expiration model===
+*'''explicit expiration times:''' memcached lets us set an expiration time on an object when we store it. After the time is up, another request for the object will find that it has expired and return nothing to us.
+**pro: last-ditch fallback to let data that ''could'' be updated badly eventually fall out of the cache
+**con: we have to know ahead of time when it will cease to be invalid. hard to do when we're dealing with user edits!
+
+*'''delete cached objects when we know we're doing something that will cause them to be invalid but are not in a position to update them while we're at it'''
+**pro: fairly simple; the item will be reloaded from the database and recached when it's next needed
+**con: if this will affect a large number of related items (for instance, creating or deleting a page invalidates the links/brokenlinks tables and rendered HTML cache of pages that link to that page) we may have to hunt them all down and do a lot of updating
+
+*'''include timestamps on cached objects and do our own expiries based on dependencies'''
+**pro: can expire many objects at once by updating a single node they depend on
+**con: more things to load; multiple dependencies could be trickier to work with
+
+===Questions & Answers===
+Q: ''The current plan is to deploy six load balanced Apaches, the likeliness that one of them renders the same page twice should be 1/6 of the current value, right?''<br />
+A: Memcached is a shared cache between all Apaches, communication is done with TCP.
+
+Q: ''Squid will cache the majority of content, reducing repetitions drastically. What's the point in memcached then?''<br />
+A: The squid only replaces the anonymous cache. Memcached has far wider applicability, both currently implemented and potentially. -- [[User:Tim Starling|Tim Starling]] 02:12, 16 Jan 2004 (UTC)
+
+Q: ''Does Memcached have anything to do with your browser or your browser's cache?''<br />
+A: NO!
+
+Q: ''Can I have multiple clients written in different programming languages access the same Memcached server?''<br />
+A: Of course.
+
+Q: ''Can I search on part of a key or a regular expression on a Memcached server?''<br />
+A: No, you can only search for an exact key if you need more information on what you could possibly do you can check out the [https://github.com/memcached/memcached/blob/master/doc/protocol.txt Memcached protocol]
+
+Q: ''Can I have multiple wikis point to the same Memcached server?''<br />
+A: Yes, as long as each have different wiki-ids ([[Manual:$wgDBname|$wgDBname]]). Certain cache keys are intentionally shared in such a scenario, such as rate limiting stuff.
+
+==See also==
+
+*[[Manual:$wgMainCacheType|$wgMainCacheType]]
+*[[Manual:$wgMemCachedServers|$wgMemCachedServers]]
+*[[Manual:Performance tuning]]
+
+[[Category:Cache]]
+[[Category:Performance tuning]]
