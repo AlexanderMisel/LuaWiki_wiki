@@ -8,7 +8,7 @@
     title        = @or($title, $_pagename)
     titlestyle   = 
     image        = {
-      data    = @and($logo, { [[File:$logo|300px@and($logo_alt, {|alt=$logo_alt})@and($logo_caption, {|$logo_caption})]] })
+      data    = @and($logo, { [[@and(not $logo:match('^[Ff]ile:'), {File:})$logo|300px@and($logo_alt, {|alt=$logo_alt})@and($logo_caption, {|$logo_caption})]] })
       caption = @or($logo_caption, {})
     }
     labelstyle   = white-space: nowrap;
