@@ -1,0 +1,1 @@
+[[File:Open Access logo PLoS transparent.svg|9px|link=开放获取|alt=开放获取|开放获取文献，可免费阅读]]
