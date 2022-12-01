@@ -1,0 +1,1 @@
+@lang:lang_name{fr}：<span lang="fr">$1</span>

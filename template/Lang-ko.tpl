@@ -1,0 +1,1 @@
+@lang:lang_name{ko}：<span lang="ko">$1</span>

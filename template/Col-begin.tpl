@@ -1,0 +1,1 @@
+{| class="multicol" role="presentation" style="border-collapse: collapse; padding: 0; border: 0; background:transparent; width:100%;"

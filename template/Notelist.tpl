@@ -1,1 +1,1 @@
-<references group="low-alpha" style="list-style-type: lower-alpha;"></references>
+<references group="lower-alpha" style="list-style-type: lower-alpha;"></references>

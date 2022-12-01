@@ -1,0 +1,1 @@
+<span lang="$1-Latn" xml:lang="$1-Latn" title="@lang:transl($1, $2)">@or($3, $2)</span>

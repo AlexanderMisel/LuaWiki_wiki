@@ -1,0 +1,1 @@
+@lang:lang_name{vi}：<span lang="vi">$1</span>

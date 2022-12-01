@@ -1,1 +1,1 @@
-<ref group="low-alpha" @and($name, {name="$name"}) >$1</ref>
+<ref group="lower-alpha" @and($name, {name="$name"}) >$1</ref>
