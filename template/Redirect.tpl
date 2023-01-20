@@ -1,6 +1,6 @@
 @hatnote{
   [[File:Disambig gray.svg|24px|link=Wikipedia:消歧义]]
-  此@or(@and($section, {章节}), {条目})介绍的是$1。
+  “'''$1'''”重定向于此。
   @expr((function()
     local str = {}
     local i = 1

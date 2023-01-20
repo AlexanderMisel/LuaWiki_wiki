@@ -1,0 +1,1 @@
+<div style="padding:0.1em 0;line-height:1.2em;">@or($2, $1)</div>
